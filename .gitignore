@@ -216,3 +216,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Loom —— 本地 SQLite 数据库(上线用 Railway 的 Postgres,本地兜底会生成这些文件)
+*.db
+*.sqlite3
