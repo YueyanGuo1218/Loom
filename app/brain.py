@@ -83,7 +83,10 @@ def run_agent(chat_id: int, wake_reason: str) -> str:
     wake_reason 是一句人话,描述「这次为什么被唤醒」,会作为
     [唤醒原因] 注入给模型。
     """
-    client = anthropic.Anthropic(api_key=config.settings.anthropic_api_key)
+    client = anthropic.Anthropic(
+        api_key=config.settings.anthropic_api_key,
+        base_url=config.settings.anthropic_base_url,
+    )
 
     messages = _recent_history(chat_id) + [
         {"role": "user", "content": _build_wake_message(wake_reason)}

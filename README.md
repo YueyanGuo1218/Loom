@@ -86,6 +86,7 @@ Railway Cron(每分钟)──▶ POST /internal/cron ──▶ 找到期定时�
 |------|------|------|
 | `TELEGRAM_BOT_TOKEN` | ✅ | 从 @BotFather 获取 |
 | `ANTHROPIC_API_KEY` | ✅ | 从 console.anthropic.com 获取 |
+| `ANTHROPIC_BASE_URL` | 可选 | 用中转站时填中转站地址;直连留空 |
 | `DATABASE_URL` | 本地可空 | Railway 附加 Postgres 后自动注入;本地默认 SQLite |
 | `WEBHOOK_URL` | 可选 | 公网地址,用于自动 setWebhook |
 | `WEBHOOK_SECRET` | 可选 | Telegram webhook 鉴权(推荐) |

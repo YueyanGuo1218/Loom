@@ -11,6 +11,8 @@ class Settings(BaseSettings):
 
     telegram_bot_token: str
     anthropic_api_key: str
+    # 可选:Anthropic API 中转站/自定义 base_url(留空则用官方 api.anthropic.com)。
+    anthropic_base_url: Optional[str] = None
 
     # Railway 附加 Postgres 后会自动注入 DATABASE_URL;本机开发默认用 SQLite。
     database_url: str = "sqlite:///./loom.db"
