@@ -77,7 +77,7 @@ TOOLS = [
 ]
 
 
-def run_agent(chat_id: int, wake_reason: str) -> str:
+def run_agent(user_id: str, conversation_id: str, wake_reason: str) -> str:
     """执行一次唤醒,返回要发给用户的回复文本。
 
     wake_reason 是一句人话,描述「这次为什么被唤醒」,会作为
@@ -88,7 +88,7 @@ def run_agent(chat_id: int, wake_reason: str) -> str:
         base_url=config.settings.anthropic_base_url,
     )
 
-    messages = _recent_history(chat_id) + [
+    messages = _recent_history(conversation_id) + [
         {"role": "user", "content": _build_wake_message(wake_reason)}
     ]
 
@@ -107,7 +107,9 @@ def run_agent(chat_id: int, wake_reason: str) -> str:
             tool_results = []
             for block in response.content:
                 if block.type == "tool_use":
-                    result = _execute_tool(block.name, block.input, chat_id)
+                    result = _execute_tool(
+                        block.name, block.input, user_id, conversation_id
+                    )
                     tool_results.append(
                         {"type": "tool_result", "tool_use_id": block.id, "content": result}
                     )
@@ -129,13 +131,13 @@ def _build_wake_message(wake_reason: str) -> str:
     return f"[唤醒原因] {wake_reason}\n[当前时间] {now}"
 
 
-def _recent_history(chat_id: int, limit: int = 30) -> list:
+def _recent_history(conversation_id: str, limit: int = 30) -> list:
     """取最近 limit 条对话作为上下文,保证首条是 user(API 要求)。"""
     db = SessionLocal()
     try:
         rows = (
             db.query(models.Message)
-            .filter(models.Message.chat_id == chat_id)
+            .filter(models.Message.conversation_id == conversation_id)
             .order_by(models.Message.id.desc())
             .limit(limit)
             .all()
@@ -148,7 +150,9 @@ def _recent_history(chat_id: int, limit: int = 30) -> list:
         db.close()
 
 
-def _execute_tool(name: str, args: dict, chat_id: int) -> str:
+def _execute_tool(
+    name: str, args: dict, user_id: str, conversation_id: str
+) -> str:
     """执行模型调用的工具,返回给模型的工具结果文本。"""
     if name == "set_timer":
         fire_at = _parse_datetime(args.get("when"))
@@ -160,9 +164,27 @@ def _execute_tool(name: str, args: dict, chat_id: int) -> str:
         db = SessionLocal()
         try:
             wakeup = models.ScheduledWakeup(
-                chat_id=chat_id, fire_at=fire_at, reason=reason, status="pending"
+                user_id=user_id,
+                conversation_id=conversation_id,
+                fire_at=fire_at,
+                reason=reason,
+                status="pending",
             )
             db.add(wakeup)
+            db.flush()
+            db.add(
+                models.AgentJob(
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    kind="timer",
+                    run_at=fire_at,
+                    payload={
+                        "wake_reason": f"定时器到点,当时的理由是:「{reason}」",
+                        "scheduled_wakeup_id": wakeup.id,
+                    },
+                    status="pending",
+                )
+            )
             db.commit()
             return f"已设定定时器:{fire_at.isoformat()}(UTC)。到点后你会被唤醒,理由是「{reason}」。"
         finally:
@@ -174,7 +196,9 @@ def _execute_tool(name: str, args: dict, chat_id: int) -> str:
             return "错误:content 不能为空。"
         db = SessionLocal()
         try:
-            thought = models.Thought(chat_id=chat_id, content=content)
+            thought = models.Thought(
+                user_id=user_id, conversation_id=conversation_id, content=content
+            )
             db.add(thought)
             db.commit()
             return "已保存这条想法。"

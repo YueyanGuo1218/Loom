@@ -1,55 +1,49 @@
 # Loom
 
-会主动发起对话的 Telegram AI 助手,帮助用户把碎片化思考、偶然的灵感逐步构建成理论。
+会主动发起对话的 AI 助手，帮助用户把碎片化思考逐步构建成理论。
 
-## 技术栈
+## 运行模型
 
-- Python 3.9+(Railway 上用 3.11+)
-- FastAPI + Uvicorn(承载 Telegram webhook)
-- PostgreSQL(Railway 托管)/ SQLite(本地兜底),SQLAlchemy ORM
-- Claude API(`claude-opus-5`)
-- Railway Cron(每分钟触发 `/internal/cron` 做定时唤醒)
+一个 Railway 服务、一个 FastAPI 进程：Webhook 快速确认 Telegram 请求；同一进程内的常驻 Gardener Worker 从 PostgreSQL 认领任务并在必要时调用 AI。**不使用 Railway Cron。**
 
-## 架构(数据流)
+```text
+Telegram → POST /webhook → messages + agent_jobs → 200 OK
+                                      ↓
+                     Gardener Worker → brain → channels → Telegram
+```
 
-- **用户消息**:Telegram → `POST /webhook` → 去重 + 存 `messages` → 入队 → **立即返回 200** → 后台 worker 串行跑 `brain.run_agent` → 回复
-- **定时唤醒**:Railway Cron → `POST /internal/cron`(带 `CRON_SECRET`)→ 找到期定时器 → 标 `fired` + 入队 → 后台 worker 跑 `brain.run_agent` → 主动发消息
+- `agent_jobs` 是任务唯一事实来源，绝不把关键任务只放内存。
+- `running` job 使用 lease；进程中断后会自动重新成为可认领任务。
+- worker 单线程串行处理，保证当前单实例下回复与上下文有序。
+- AI 只在用户消息、明确到点任务或未来的低频园丁复盘发生时调用。
 
-> 关键设计:webhook/cron **秒回 200**,AI 处理全部交给单一后台 worker 串行执行,避免 Telegram 因等待超时重试,也保证回复有序、上下文不乱。
+## 身份和渠道边界
 
-## 核心概念
+- `User` 是 Loom 内部身份。
+- `Identity` 把外部身份连到 User；当前为 `telegram` + Telegram `from.id`。
+- `Conversation` 是渠道投递地址；当前为 `telegram` + Telegram `chat.id`。
+- 核心逻辑必须使用 `user_id` / `conversation_id`，不得新增 `chat_id` 依赖。
+- 所有渠道发送必须经 `app/channels.py`，不得从 worker 或 brain 直接调用 Telegram API。
+- 未来 App 认证只需把经验证的认证 subject 绑定为另一条 Identity；不要自行实现密码认证。
 
-- **唤醒上下文(wake reason)**:每次调 AI 都告诉它「为什么被叫醒」,通过用户消息里的 `[唤醒原因]` 注入。这是本项目的灵魂 —— 用户消息唤醒和定时器唤醒走同一套 `run_agent`,只是 `wake_reason` 不同。
-- **工具(tool use)**:`set_timer`(设定时器)/ `save_thought`(存灵感)。手动 tool-use 循环在 `brain.py` 里,不使用 SDK 的 tool runner,便于控制 DB 副作用。
-
-## 文件结构
+## 文件职责
 
 | 文件 | 职责 |
-|------|------|
-| `app/main.py` | FastAPI 入口 + lifespan(建表、设 webhook) |
-| `app/config.py` | 环境变量(pydantic-settings) |
-| `app/db.py` | SQLAlchemy 引擎 + Session 工厂(处理 `postgres://` → `postgresql://`) |
-| `app/models.py` | 四张表:`messages` / `thoughts` / `scheduled_wakeups` / `processed_updates`(update_id 去重) |
-| `app/telegram.py` | `send_message` / `set_webhook` / `extract_message` |
-| `app/brain.py` | Claude 大脑:系统提示词 + 工具 + agent 循环 |
-| `app/webhook.py` | `POST /webhook`(用户消息入口:去重 + 存库 + 入队) |
-| `app/cron.py` | `POST /internal/cron`(定时唤醒入口)+ `fire_due_timers()` |
-| `app/worker.py` | 后台 agent worker:单一线程串行跑 `brain.run_agent` + 存回复 + 发消息 |
-| `app/tick.py` | 备用 Cron 入口(`python -m app.tick`,curl 不可用时用) |
+|---|---|
+| `app/main.py` | FastAPI 入口、数据库初始化、worker 生命周期 |
+| `app/models.py` | User / Identity / Conversation / Message / Thought / ScheduledWakeup / AgentJob |
+| `app/db.py` | 引擎、session、旧版数据库兼容迁移 |
+| `app/identity.py` | Telegram 入站身份到内部用户/会话的解析 |
+| `app/telegram.py` | Telegram API 和 update 解析 |
+| `app/channels.py` | 通用出站渠道适配层 |
+| `app/webhook.py` | Telegram 去重、入库、创建 AgentJob、秒回 200 |
+| `app/jobs.py` | 持久任务创建、认领、租约恢复、重试 |
+| `app/worker.py` | 常驻单线程 Gardener Worker |
+| `app/brain.py` | 模型调用、工具循环、记忆写入、设定定时任务 |
 
-## 环境变量
+## 不变量
 
-见 `.env.example`:`TELEGRAM_BOT_TOKEN` / `ANTHROPIC_API_KEY` / `DATABASE_URL` / `WEBHOOK_URL` / `WEBHOOK_SECRET` / `CRON_SECRET` / `LOOM_TZ`。
-
-## 当前进度(v1)
-
-- ✅ 最小闭环(收到消息 → AI 回复 → 存库)
-- ✅ 定时唤醒基座(AI 可设定时器、知道唤醒原因、Railway Cron 触发)
-- ⏳ 待做(按优先级):多用户支持、灵感召回(thoughts 目前只存不回看)、行为建模/个性化
-
-## 注意事项
-
-- `fire_at` 统一存 UTC(timezone-aware),比较时也用 UTC。
-- 定时器触发是先标 `fired` 再入队,避免 Cron 重叠导致重复触发;触发失败会打日志但不重试。
-- webhook 用 `processed_updates` 表按 `update_id` 去重(主键唯一约束),重复请求直接跳过。
-- Claude API 用 `claude-opus-5`(adaptive thinking 默认开启),代码只取 text 块;已处理 `refusal` 停因。
+- `fire_at` 和 `AgentJob.run_at` 均是 UTC timezone-aware 时间。
+- AI 生成成功后，回复文本与 assistant Message 必须原子保存；投递重试不得再次调用 AI。
+- Telegram webhook 按 `update_id` 去重，重复请求直接返回 200。
+- 新功能不应要求新增 Railway 服务或 Cron。

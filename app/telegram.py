@@ -1,9 +1,10 @@
-"""Telegram 客户端:发消息、设 webhook、解析 update。
+"""Telegram 渠道适配器:发消息、设 webhook、解析 update。
 
 直接用 requests 调 Telegram Bot API,不引入重型框架,保持透明。
 """
 
-from typing import Optional, Tuple
+from dataclasses import dataclass
+from typing import Optional
 
 import requests
 
@@ -33,20 +34,35 @@ def set_webhook() -> dict:
     return resp.json()
 
 
-def extract_message(update: dict) -> Optional[Tuple[int, str]]:
-    """从 Telegram update 里提取 (chat_id, text)。非文本消息(图片/贴纸等)返回 None。"""
+@dataclass(frozen=True)
+class TelegramMessage:
+    """Telegram 入站消息的渠道信息。
+
+    sender_id 是用户身份；chat_id 是投递回复的会话地址。两者在私聊中常常
+    相同，但概念上必须分开，才能支持群聊和未来自有 App。
+    """
+
+    sender_id: str
+    chat_id: str
+    text: str
+
+
+def extract_message(update: dict) -> Optional[TelegramMessage]:
+    """提取 Telegram 文字消息；非文字或缺少发送者时返回 None。"""
     message = update.get("message")
     if not message:
         return None
 
     text = message.get("text")
     chat = message.get("chat") or {}
+    sender = message.get("from") or {}
     chat_id = chat.get("id")
+    sender_id = sender.get("id")
 
-    if chat_id is None or text is None:
+    if chat_id is None or sender_id is None or text is None:
         return None
 
     text = text.strip()
     if not text:
         return None
-    return chat_id, text
+    return TelegramMessage(sender_id=str(sender_id), chat_id=str(chat_id), text=text)

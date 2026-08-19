@@ -21,9 +21,6 @@ class Settings(BaseSettings):
     webhook_url: Optional[str] = None
     # 可选:Telegram webhook 鉴权 secret。
     webhook_secret: Optional[str] = None
-    # 可选:保护 /internal/cron 的 secret。
-    cron_secret: Optional[str] = None
-
     # 时区,影响「下周一」这类时间的解析。
     loom_tz: str = "Asia/Shanghai"
 

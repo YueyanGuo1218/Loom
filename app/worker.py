@@ -1,59 +1,74 @@
-"""后台 agent worker:串行处理所有「唤醒」,让 webhook / cron 能秒回。
+"""常驻园丁 worker。
 
-webhook 和 cron 只负责把 (chat_id, wake_reason) 丢进队列就立刻返回;
-真正跑 AI、存回复、发消息都在这里由单一线程串行完成,保证回复有序、
-不会因为并行而读到互相覆盖的旧上下文。
+FastAPI 与 worker 仍在同一个 Railway 实例、同一个 Python 进程内；区别在于任务
+不再放内存队列，而是保存在 PostgreSQL。进程重启后 worker 会自动接手未完成任务。
 """
 
 import logging
-import queue
 import threading
+from typing import Optional
 
-from . import brain, models, telegram
+from . import brain, channels, jobs, models
 from .db import SessionLocal
 
 logger = logging.getLogger(__name__)
 
-_queue: "queue.Queue[tuple[int, str]]" = queue.Queue()
+_wake_event = threading.Event()
+_stop_event = threading.Event()
+_thread: Optional[threading.Thread] = None
 
 
-def enqueue(chat_id: int, wake_reason: str) -> None:
-    """把一次唤醒丢进后台队列,立即返回。"""
-    _queue.put((chat_id, wake_reason))
+def notify_new_job() -> None:
+    """通知本进程的 worker 提前检查数据库；任务本身已可靠地在数据库内。"""
+    _wake_event.set()
 
 
 def start() -> None:
-    """启动单一后台 worker 线程(在 app lifespan 里调用)。"""
-    t = threading.Thread(target=_worker, daemon=True, name="agent-worker")
-    t.start()
+    """启动单一常驻 worker 线程(在 app lifespan 里调用)。"""
+    global _thread
+    if _thread is not None and _thread.is_alive():
+        return
+    _stop_event.clear()
+    _thread = threading.Thread(target=_worker, daemon=True, name="gardener-worker")
+    _thread.start()
+
+
+def stop() -> None:
+    """请求 worker 尽快结束；Railway 进程退出时任务仍会留在数据库。"""
+    _stop_event.set()
+    _wake_event.set()
 
 
 def _worker() -> None:
-    while True:
-        chat_id, wake_reason = _queue.get()
+    while not _stop_event.is_set():
+        job = jobs.claim_due_job()
+        if job is None:
+            _wake_event.wait(timeout=jobs.seconds_until_next_job())
+            _wake_event.clear()
+            continue
         try:
-            _process(chat_id, wake_reason)
-        except Exception:
-            logger.exception("agent worker: 处理失败")
-        finally:
-            _queue.task_done()
+            _process(job)
+            jobs.complete_job(job.id)
+        except Exception as exc:
+            logger.exception("gardener worker: 处理任务 %s 失败", job.id)
+            jobs.retry_job(job.id, str(exc))
 
 
-def _process(chat_id: int, wake_reason: str) -> None:
-    try:
-        reply = brain.run_agent(chat_id, wake_reason)
-    except Exception:
-        logger.exception("brain.run_agent 失败")
-        reply = "我这边出了点问题,稍后再试。"
+def _process(job: models.AgentJob) -> None:
+    wake_reason = str(job.payload.get("wake_reason") or "园丁任务到期")
+    reply = jobs.stored_result(job.id)
+    if reply is None:
+        generated_reply = brain.run_agent(job.user_id, job.conversation_id, wake_reason)
+        reply = jobs.store_result_and_message(job, generated_reply)
 
     db = SessionLocal()
     try:
-        db.add(models.Message(chat_id=chat_id, role="assistant", content=reply))
-        db.commit()
+        conversation = db.get(models.Conversation, job.conversation_id)
+        if conversation is None:
+            raise ValueError(f"任务 {job.id} 的会话不存在")
+        db.refresh(conversation)
+        db.expunge(conversation)
     finally:
         db.close()
 
-    try:
-        telegram.send_message(chat_id, reply)
-    except Exception:
-        logger.exception("send_message 失败")
+    channels.send_text(conversation, reply)

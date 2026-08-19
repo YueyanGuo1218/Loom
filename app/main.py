@@ -6,7 +6,6 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from . import config, telegram, worker
-from .cron import router as cron_router
 from .db import init_db
 from .webhook import router as webhook_router
 
@@ -31,12 +30,11 @@ async def lifespan(app: FastAPI):
         except Exception:
             logger.exception("设置 webhook 失败")
     yield
-    # 关闭:worker 是 daemon 线程,随进程退出,无需清理。
+    worker.stop()
 
 
 app = FastAPI(title="Loom", lifespan=lifespan)
 app.include_router(webhook_router)
-app.include_router(cron_router)
 
 
 @app.get("/health")
