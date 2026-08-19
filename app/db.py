@@ -11,7 +11,11 @@ _database_url = config.settings.database_url
 if _database_url.startswith("postgres://"):
     _database_url = _database_url.replace("postgres://", "postgresql://", 1)
 
-engine = create_engine(_database_url, pool_pre_ping=True)
+# SQLite 本地兜底:允许跨线程使用连接(后台 worker 会从另一个线程访问)。
+_connect_args = (
+    {"check_same_thread": False} if _database_url.startswith("sqlite") else {}
+)
+engine = create_engine(_database_url, pool_pre_ping=True, connect_args=_connect_args)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
 _CHAT_ID_TABLES = ("messages", "thoughts", "scheduled_wakeups")

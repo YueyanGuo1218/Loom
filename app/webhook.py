@@ -1,11 +1,16 @@
-"""用户消息入口:Telegram 把消息 POST 到 /webhook。"""
+"""用户消息入口:Telegram 把消息 POST 到 /webhook。
+
+流程:校验 secret → 按 update_id 去重 → 存用户消息 → 丢进后台队列 → 立即返回 200。
+AI 的实际处理和回复在 worker 里异步完成,不阻塞本请求(避免 Telegram 因等待超时而重试)。
+"""
 
 import logging
 from typing import Any
 
 from fastapi import APIRouter, Body, Header
+from sqlalchemy.exc import IntegrityError
 
-from . import brain, config, models, telegram
+from . import config, models, telegram, worker
 from .db import SessionLocal
 
 logger = logging.getLogger(__name__)
@@ -26,13 +31,27 @@ def webhook(
         logger.warning("webhook: secret 不匹配,已忽略该请求")
         return {"ok": False}
 
-    # 2. 解析文字消息;非文本消息(图片/贴纸等)v1 直接忽略。
+    # 2. 按 update_id 去重。Telegram 会重试同一 update_id,靠主键唯一约束原子去重。
+    update_id = payload.get("update_id")
+    if update_id is not None:
+        db = SessionLocal()
+        try:
+            db.add(models.ProcessedUpdate(update_id=update_id))
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            logger.info("webhook: update_id %s 已处理过,跳过", update_id)
+            return {"ok": True}
+        finally:
+            db.close()
+
+    # 3. 解析文字消息;非文本消息(图片/贴纸等)v1 直接忽略。
     parsed = telegram.extract_message(payload)
     if parsed is None:
         return {"ok": True}
     chat_id, text = parsed
 
-    # 3. 存用户消息。
+    # 4. 存用户消息。
     db = SessionLocal()
     try:
         db.add(models.Message(chat_id=chat_id, role="user", content=text))
@@ -40,24 +59,6 @@ def webhook(
     finally:
         db.close()
 
-    # 4. 调大脑。
-    try:
-        reply = brain.run_agent(chat_id, f"用户发来消息:「{text}」")
-    except Exception:
-        logger.exception("webhook: brain.run_agent 失败")
-        reply = "我这边出了点问题,稍后再试。"
-
-    # 5. 存回复 + 发回用户。
-    db = SessionLocal()
-    try:
-        db.add(models.Message(chat_id=chat_id, role="assistant", content=reply))
-        db.commit()
-    finally:
-        db.close()
-
-    try:
-        telegram.send_message(chat_id, reply)
-    except Exception:
-        logger.exception("webhook: send_message 失败")
-
+    # 5. 丢进后台队列,立即返回;AI 处理在 worker 里异步进行。
+    worker.enqueue(chat_id, f"用户发来消息:「{text}」")
     return {"ok": True}

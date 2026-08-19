@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from . import config, telegram
+from . import config, telegram, worker
 from .cron import router as cron_router
 from .db import init_db
 from .webhook import router as webhook_router
@@ -19,9 +19,11 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 启动:建表 + (若配了 WEBHOOK_URL)设置 Telegram webhook。
+    # 启动:建表 + 启动后台 worker + (若配了 WEBHOOK_URL)设置 Telegram webhook。
     init_db()
     logger.info("数据库已初始化")
+    worker.start()
+    logger.info("后台 worker 已启动")
     if config.settings.webhook_url:
         try:
             telegram.set_webhook()
@@ -29,7 +31,7 @@ async def lifespan(app: FastAPI):
         except Exception:
             logger.exception("设置 webhook 失败")
     yield
-    # 关闭:暂无需清理。
+    # 关闭:worker 是 daemon 线程,随进程退出,无需清理。
 
 
 app = FastAPI(title="Loom", lifespan=lifespan)

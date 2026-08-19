@@ -33,11 +33,15 @@ Loom 希望实现如下功能:
 ## 工作原理
 
 ```
-用户发消息 ──▶ Telegram ──▶ POST /webhook ──▶ 存库 ──▶ Claude 大脑 ──▶ 回复
-                                                        ▲
-Railway Cron(每分钟)──▶ POST /internal/cron ──▶ 找到期定时器 ──┘
+用户发消息 ──▶ Telegram ──▶ POST /webhook ──▶ 存库 ──▶ 入队 ──▶ 立即返回 200
+                                                            │
+Railway Cron(每分钟)──▶ POST /internal/cron ──▶ 找到期定时器 ─┤
+                                                            ▼
+                                      后台 worker(串行)──▶ Claude 大脑 ──▶ 回复
 ```
 
+- **秒回 + 后台处理**:webhook/cron 收到请求立刻返回 200,AI 的处理在单一后台 worker 里串行完成,避免 Telegram 因等待超时重试,也保证回复有序。
+- **去重**:按 Telegram 的 `update_id` 去重,重复请求直接跳过。
 - **唤醒上下文**:每次调 AI 都会告诉它「这次为什么被叫醒」(用户消息 or 定时器到点),以及当前时间。
 - **AI 的两个工具**:`set_timer`(设定时器)、`save_thought`(记录灵感)。
 

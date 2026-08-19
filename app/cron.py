@@ -1,6 +1,7 @@
 """定时唤醒入口:Railway Cron 每分钟调一次 /internal/cron。
 
-DB 是定时器的唯一事实源;Cron 只负责按点敲门,由这里检查并触发到期任务。
+DB 是定时器的唯一事实源;Cron 只负责按点敲门。这里把到期的定时器标记 fired
+并丢进后台队列,AI 的实际处理和发消息由 worker 异步完成。
 """
 
 import logging
@@ -9,7 +10,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Header
 from sqlalchemy import and_
 
-from . import brain, config, models, telegram
+from . import config, models, worker
 from .db import SessionLocal
 
 logger = logging.getLogger(__name__)
@@ -18,7 +19,7 @@ router = APIRouter()
 
 
 def fire_due_timers() -> int:
-    """把到期的定时器全部触发,返回触发个数。"""
+    """把到期的定时器标记 fired 并加入后台队列,返回个数。"""
     db = SessionLocal()
     fired = 0
     try:
@@ -37,18 +38,8 @@ def fire_due_timers() -> int:
             # 先标记 fired,避免下次 Cron 重复触发。
             w.status = "fired"
             db.commit()
-
-            try:
-                reply = brain.run_agent(
-                    w.chat_id, f"定时器到点,当时的理由是:「{w.reason}」"
-                )
-                db.add(models.Message(chat_id=w.chat_id, role="assistant", content=reply))
-                db.commit()
-                telegram.send_message(w.chat_id, reply)
-                fired += 1
-            except Exception:
-                logger.exception("cron: 触发定时器 %s 失败", w.id)
-
+            worker.enqueue(w.chat_id, f"定时器到点,当时的理由是:「{w.reason}」")
+            fired += 1
         return fired
     finally:
         db.close()

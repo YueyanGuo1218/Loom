@@ -12,8 +12,10 @@
 
 ## 架构(数据流)
 
-- **用户消息**:Telegram → `POST /webhook` → 存 `messages` → `brain.run_agent` → 回复
-- **定时唤醒**:Railway Cron → `POST /internal/cron`(带 `CRON_SECRET`)→ 找到期定时器 → `brain.run_agent` → 主动发消息
+- **用户消息**:Telegram → `POST /webhook` → 去重 + 存 `messages` → 入队 → **立即返回 200** → 后台 worker 串行跑 `brain.run_agent` → 回复
+- **定时唤醒**:Railway Cron → `POST /internal/cron`(带 `CRON_SECRET`)→ 找到期定时器 → 标 `fired` + 入队 → 后台 worker 跑 `brain.run_agent` → 主动发消息
+
+> 关键设计:webhook/cron **秒回 200**,AI 处理全部交给单一后台 worker 串行执行,避免 Telegram 因等待超时重试,也保证回复有序、上下文不乱。
 
 ## 核心概念
 
@@ -27,11 +29,12 @@
 | `app/main.py` | FastAPI 入口 + lifespan(建表、设 webhook) |
 | `app/config.py` | 环境变量(pydantic-settings) |
 | `app/db.py` | SQLAlchemy 引擎 + Session 工厂(处理 `postgres://` → `postgresql://`) |
-| `app/models.py` | 三张表:`messages` / `thoughts` / `scheduled_wakeups` |
+| `app/models.py` | 四张表:`messages` / `thoughts` / `scheduled_wakeups` / `processed_updates`(update_id 去重) |
 | `app/telegram.py` | `send_message` / `set_webhook` / `extract_message` |
 | `app/brain.py` | Claude 大脑:系统提示词 + 工具 + agent 循环 |
-| `app/webhook.py` | `POST /webhook`(用户消息入口) |
+| `app/webhook.py` | `POST /webhook`(用户消息入口:去重 + 存库 + 入队) |
 | `app/cron.py` | `POST /internal/cron`(定时唤醒入口)+ `fire_due_timers()` |
+| `app/worker.py` | 后台 agent worker:单一线程串行跑 `brain.run_agent` + 存回复 + 发消息 |
 | `app/tick.py` | 备用 Cron 入口(`python -m app.tick`,curl 不可用时用) |
 
 ## 环境变量
@@ -47,5 +50,6 @@
 ## 注意事项
 
 - `fire_at` 统一存 UTC(timezone-aware),比较时也用 UTC。
-- 定时器触发是先标 `fired` 再发消息,避免 Cron 重叠导致重复触发;触发失败会打日志但不重试。
+- 定时器触发是先标 `fired` 再入队,避免 Cron 重叠导致重复触发;触发失败会打日志但不重试。
+- webhook 用 `processed_updates` 表按 `update_id` 去重(主键唯一约束),重复请求直接跳过。
 - Claude API 用 `claude-opus-5`(adaptive thinking 默认开启),代码只取 text 块;已处理 `refusal` 停因。

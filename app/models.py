@@ -40,3 +40,16 @@ class ScheduledWakeup(Base):
     reason = Column(Text)
     status = Column(String(20), default="pending")  # pending | fired | cancelled
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class ProcessedUpdate(Base):
+    """已处理过的 Telegram update_id,用于去重。
+
+    Telegram 对未及时确认的请求会用同一个 update_id 重试;这里用主键唯一约束
+    原子地去重 —— 谁先插入谁处理,重试请求撞主键直接跳过。
+    """
+
+    __tablename__ = "processed_updates"
+
+    update_id = Column(BigInteger, primary_key=True)
+    processed_at = Column(DateTime(timezone=True), server_default=func.now())
